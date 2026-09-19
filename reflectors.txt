@@ -1,0 +1,2 @@
+# fallback dummy list
+127.0.0.1 11211 memcached 0

