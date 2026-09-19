@@ -1,0 +1,32 @@
+=== CARA CARI URL REFLECTOR LIST ===
+
+Buka Google, ketik salah satu:
+  "open memcached list github raw"
+  "cldap amplification list github"
+  "open dns resolver list github"
+
+Target URL yang lo cari harus berbentuk:
+  https://raw.githubusercontent.com/USER/REPO/BRANCH/file.txt
+  atau
+  https://gist.githubusercontent.com/USER/HASH/raw/file.txt
+
+Isi isinya berupa daftar IP (satu per baris), contoh:
+  104.28.16.5
+  185.199.108.153
+  ...
+
+Buka file: tools/scan_reflectors_v2.py
+Cari baris: SOURCES = {
+Isi URL di dalam list:
+    "memcached": [
+        "https://raw.githubusercontent.com/.../memcached.txt",
+    ],
+
+Simpan, jalanin:
+  python3 tools/scan_reflectors_v2.py
+
+Hasil masuk ke: reflectors.txt
+
+=== VALIDASI OTOMATIS ===
+Skrip kirim 1 probe ke tiap IP, cek ada response.
+Hanya IP yang jawab yang masuk list.
